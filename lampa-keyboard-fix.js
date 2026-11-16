@@ -7,7 +7,7 @@
     var attempts = 0;
     function boot() {
         var app = window.Lampa, nav = window.Navigator;
-        var ctl = app && app.Controller;
+        var ctl = app && window.Lampa.Controller;
         if (!ctl || typeof ctl.enabled !== 'function' || !nav ||
             typeof nav.navigate !== 'function' || typeof nav.focus !== 'function' ||
             typeof nav.getFocusedElement !== 'function') {
