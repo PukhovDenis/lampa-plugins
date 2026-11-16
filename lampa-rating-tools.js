@@ -1,10 +1,10 @@
-/* Lampa Rating Tools v0.1.0 — independent companion for Rate.js.
+/* Lampa Rating Tools v0.1.1 — independent companion for Rate.js.
  * Tests run only on request. API key is read locally, sent only to the selected Kinopoisk API endpoint.
  * Cache operations are limited to the two known KP/IMDb stores. No third-party code copied.
  */
 (function ratingTools(window) {
     'use strict';
-    var VERSION = '0.1.0';
+    var VERSION = '0.1.1';
     var URL = 'https://kinopoiskapiunofficial.tech/api/v2.2/films/301';
     var CACHE_KEYS = ['rating_cache_kp_rating', 'kp_rating'];
     var ID = 'pukhov_rating_tools';
@@ -39,15 +39,42 @@
                 return {name: name, value: isMap(value) ? value : null};
             });
         }
-        function close() { L.Modal.close(); }
+        function activeController() {
+            return L.Controller && typeof L.Controller.enabled === 'function' ? L.Controller.enabled() : null;
+        }
+        function sameController(a, b) {
+            return !!(a && b && a.name === b.name && (!a.controller || !b.controller || a.controller === b.controller));
+        }
+        function ratingSettingsActive(start) {
+            var current = activeController();
+            return sameController(start, current) && current.name === 'settings_component' &&
+                !!window.document.querySelector('[data-name="' + ID + '_api"]');
+        }
         function dialog(title, lines, confirmed) {
+            var previous = activeController();
+            var returnTo = previous && previous.name === 'settings' ? 'settings' : 'settings_component';
+            var closed = false;
             var wrap = $('<div></div>').css({lineHeight:'1.5', padding:'0.4em'});
             lines.forEach(function (line) {
                 wrap.append($('<div></div>').css({marginBottom:'0.55em'}).text(line));
             });
+            function dismiss(next) {
+                if (closed) return;
+                closed = true;
+                L.Modal.close();
+                // Lampa's modal close does not necessarily restore the settings controller.
+                // Restore before opening a follow-up dialog, not on a delayed global timer.
+                var current = activeController();
+                if (L.Controller && typeof L.Controller.toggle === 'function' &&
+                    (!current || !current.name || current.name === 'modal')) {
+                    L.Controller.toggle(returnTo);
+                }
+                if (typeof next === 'function') next();
+            }
+            function close() { dismiss(); }
             var buttons = confirmed ? [
                 {name:'Отмена', onSelect:close},
-                {name:'Подтвердить', onSelect:function () { close(); confirmed(); }}
+                {name:'Подтвердить', onSelect:function () { dismiss(confirmed); }}
             ] : [{name:'Закрыть', onSelect:close}];
             L.Modal.open({title:title,html:wrap,size:'medium',buttons:buttons,onBack:close});
         }
@@ -137,6 +164,7 @@
             }
             busy = true;
             var started = Date.now(), done = false, request, timer, xhr;
+            var startedIn = activeController();
             notify('Rating Tools: выполняется один запрос к API');
             function finish(status, kind, body) {
                 if (done) return;
@@ -158,13 +186,11 @@
                 }
                 lines.push('Ключ не выводится. Тест не изменяет кэш рейтингов.');
                 // Avoid interrupting another dialog if the user has left settings.
-                var active = L.Controller && typeof L.Controller.enabled === 'function' && L.Controller.enabled();
-                if (active && active.name && active.name !== 'settings_component' && active.name !== 'settings') {
-                    lastResult = lines;
-                    notify('Rating Tools: тест завершён. Результат в разделе «Последний тест».');
-                } else {
-                    lastResult = lines;
+                lastResult = lines;
+                if (ratingSettingsActive(startedIn)) {
                     dialog('Результат проверки API', lines);
+                } else {
+                    notify('Rating Tools: тест завершён. Результат в разделе «Последний тест».');
                 }
             }
             try {
@@ -232,7 +258,7 @@
         }
         // Real Lampa API access also identifies this as a Lampa extension.
         window.Lampa.SettingsApi.addComponent({
-            component:ID,name:'Rating Tools',
+            component:ID,name:'Rating Tools v' + VERSION,
             icon:'<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18M7 16l4-5 4 3 5-7"/><circle cx="20" cy="7" r="1.5"/></svg>'
         });
         add('api','Проверить API-ключ','Один прямой запрос с приставки; ключ не выводится.',function(){testApi(false);});
