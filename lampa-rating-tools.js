@@ -1,10 +1,10 @@
-/* Lampa Rating Tools v0.1.2 — independent companion for Rate.js.
+/* Lampa Rating Tools v0.1.3 — independent companion for Rate.js.
  * Tests run only on request. API key is read locally, sent only to the selected Kinopoisk API endpoint.
  * Cache operations are limited to the two known KP/IMDb stores. No third-party code copied.
  */
 (function ratingTools(window) {
     'use strict';
-    var VERSION = '0.1.2';
+    var VERSION = '0.1.3';
     var URL = 'https://kinopoiskapiunofficial.tech/api/v2.2/films/301';
     var CACHE_KEYS = ['rating_cache_kp_rating', 'kp_rating'];
     var ID = 'pukhov_rating_tools';
@@ -279,50 +279,81 @@
     function host(u){try{var p=new window.URL(u,window.location.href);return /^https?:$/.test(p.protocol)?p.hostname:'не HTTP';}catch(e){return 'не определён';}}
     function recording(){return trace&&!trace.stopped&&Date.now()-trace.started<120000;}
     function response(e){
-        if(!recording()||!e||!e.params||!e.data)return;
-        try{
-            var d=e.data.movie||e.data,i=id(d),r=ratings(d),u=String(e.params.url||''),m=u.match(/\/(movie|tv)\/(\d+)(?:[?#]|$)/);
-            if(!i||!(r.kp||r.imdb||m&&m[2]===i))return;
-            if(trace.responses.length>=100)trace.responses.shift();
-            trace.responses.push({id:i,type:m?m[1]:type(d),host:host(u),r:r});
-        }catch(ignore){}
-    }
+    if(!recording()||!e||!e.params||!e.data)return;
+    try {
+        var root=e.data,d=root.movie||root.data||root,r=ratings(d),u=String(e.params.url||''),m=u.match(/\/(movie|tv)\/(\d+)(?:[?#]|$)/);
+        var endpoint=/\/KPrating(?:[/?#]|$)/i.test(u),h=host(u),post=e.params.post_data,posted=post&&typeof post==='object'?String(post.card_id||post.tmdb_id||''):'';
+        var matchId=/^\d{1,12}$/.test(posted)?posted:m?m[2]:endpoint||/(^|\.)lampa\.stream$/i.test(h)?'':id(d);
+        if(!(r.kp||r.imdb||endpoint||m&&m[2]===id(d)))return;
+        if(!matchId&&!trace.movie)return;
+        if(trace.responses.length>=100)trace.responses.shift();
+        trace.responses.push({id:matchId,type:m?m[1]:'',host:h,endpoint:endpoint?'/KPrating':'',r:r,at:Date.now()});
+    }catch(ignore){}
+}
+    function sampleDom(item){
+    if(!item||!item.body||typeof item.body.find!=='function')return;
+    try{
+        function dom(selector){return num(item.body.find(selector+':not(.hide)').first().find('div').first().text());}
+        var r={kp:dom('.rate--kp'),imdb:dom('.rate--imdb')};
+        if(r.kp||r.imdb)item.dom=r;
+    }catch(ignore){}
+}
+    function resourceHosts(){
+    var list=[],seen=Object.create(null);
+    try{
+        if(!window.performance||!window.performance.getEntriesByType)return list;
+        window.performance.getEntriesByType('resource').forEach(function(e){
+            if(e.startTime<trace.perfStart)return;
+            var u=String(e.name||''),h=host(u),ep=/\/KPrating(?:[/?#]|$)/i.test(u);
+            if(!ep&&!/(^|\.)(lampa\.stream|rating\.kinopoisk\.ru|kinopoiskapiunofficial\.tech|poiskkino\.dev)$/i.test(h))return;
+            var label=h+(ep?'/KPrating':'');
+            if(!seen[label]){seen[label]=true;list.push(label);}
+        });
+    }catch(ignore){}
+    return list.slice(-5);
+}
     function full(e){
         if(!recording()||!e||['start','complite','complete'].indexOf(e.type)<0)return;
         try{
             var o=e.object||{},d=e.data&&e.data.movie||o.card,i=id(d),t=type(d,o);
             if(!i||!t)return;
             var prev=trace.movie,item={id:i,type:t,source:safeSource(d.source||o.source),title:String(d.title||d.name||'Без названия').slice(0,80),r:ratings(d),dom:null};
-            if(prev&&prev.id===i&&prev.type===t&&prev.dom)item.dom=prev.dom;
-            if(e.type!=='start'&&e.body&&typeof e.body.find==='function'){
-                function dom(s){return num(e.body.find(s+':not(.hide)').first().find('div').first().text());}
-                item.dom={kp:dom('.rate--kp'),imdb:dom('.rate--imdb')};
+            if(prev&&prev.id===i&&prev.type===t){item.dom=prev.dom;item.body=prev.body;item.openedAt=prev.openedAt;}
+            else item.openedAt=Date.now();
+            if(e.body&&typeof e.body.find==='function')item.body=e.body;
+            if(!item.body&&o.activity&&typeof o.activity.render==='function'){
+                try{item.body=window.$(o.activity.render());}catch(ignore){}
             }
             trace.movie=item;
+            sampleDom(item);
         }catch(ignore){}
     }
     var supported=L.Listener&&typeof L.Listener.follow==='function';
     if(supported){L.Listener.follow('request_secuses',response);L.Listener.follow('full',full);}
     function start(){
         if(!supported){dialog('Источник рейтингов',['События Lampa недоступны.']);return;}
-        trace={started:Date.now(),stopped:false,responses:[],movie:null};result=null;
-        dialog('Запись источника включена',['Закройте окно и настройки. Откройте один фильм с рейтингами внутри карточки.','Вернитесь в Rating Tools → «Отчёт об источнике». Запись ограничена двумя минутами.','Дополнительных запросов нет. Данные диагностики хранятся только в памяти.']);
+        trace={started:Date.now(),stopped:false,responses:[],movie:null,perfStart:window.performance&&typeof window.performance.now==='function'?window.performance.now():0};result=null;
+        dialog('Запись источника включена',['Закройте окно и настройки. Откройте один новый фильм и дождитесь появления оценок КП и IMDb.','Не выходя из фильма, откройте Rating Tools → «Отчёт об источнике». Запись ограничена двумя минутами.','Дополнительных запросов нет. Данные диагностики хранятся только в памяти.']);
     }
     function report(){
         if(!trace||!trace.movie){dialog('Отчёт об источнике',['Данных полной карточки пока нет. Включите запись и откройте фильм.']);return;}
+        sampleDom(trace.movie);
         trace.stopped=true;
-        var m=trace.movie,lines=[m.title+' · '+m.type+'/'+m.id+' · источник: '+m.source,'Данные полной карточки: '+fmt(m.r),'Отображение внутри: '+fmt(m.dom)];
-        var seen=Object.create(null),hits=trace.responses.filter(function(x){return x.id===m.id&&(!x.type||x.type===m.type);}).filter(function(x){var k=x.host+'|'+fmt(x.r);if(seen[k])return false;seen[k]=true;return true;}).slice(-5);
+        var m=trace.movie,lines=[m.title+' · '+m.type+'/'+m.id+' · источник: '+m.source,'Данные полной карточки: '+fmt(m.r),'Отображение после загрузки: '+fmt(m.dom)];
+        var seen=Object.create(null),hits=trace.responses.filter(function(x){return x.id===m.id&&(!x.type||x.type===m.type)||!x.id&&x.at>=m.openedAt;}).filter(function(x){var k=x.id+'|'+x.host+x.endpoint+'|'+fmt(x.r);if(seen[k])return false;seen[k]=true;return true;}).slice(-5);
         if(!hits.length)lines.push('Сетевой ответ не зафиксирован: возможен кэш или другой сетевой модуль.');
-        hits.forEach(function(x){lines.push('Ответ '+x.host+': '+fmt(x.r));});
+        hits.forEach(function(x){lines.push((x.id?'Ответ ':'Кандидат (без ID) ')+x.host+x.endpoint+': '+fmt(x.r));});
+        var resources=resourceHosts();if(resources.length)lines.push('Сетевые ресурсы (без привязки к фильму): '+resources.join(', '));
+        m.body=null;
         try{
             var cache=L.Storage.get('rating_cache_kp_rating',{})||{},rec=cache[m.id];
             lines.push('Кэш Rate.js: '+fmt(rec&&{kp:num(rec.kp),imdb:num(rec.imdb)}));
+            var old=(L.Storage.get('kp_rating',{})||{})[m.id];lines.push('Старый кэш kp_rating: '+fmt(old&&{kp:num(old.kp),imdb:num(old.imdb)}));
             var cards=window.document.querySelectorAll('.card');
             for(var i=0;i<cards.length;i++){var d=cards[i].card_data;if(id(d)===m.id&&type(d)===m.type){lines.push('Данные постера: '+fmt(ratings(d)));break;}}
         }catch(ignore){}
         if(result)lines.push(result);
-        lines.push('Только имена серверов, без путей и ключей. Оценки не изменены.');
+        lines.push('Имена серверов и известный путь KPrating; без ключей и параметров. Оценки не изменены.');
         dialog('Отчёт об источнике',lines);
     }
     function test(){
