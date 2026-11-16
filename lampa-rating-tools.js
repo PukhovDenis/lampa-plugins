@@ -120,6 +120,7 @@
             if (status === 403) return 'Доступ запрещён сервером.';
             if (status === 429) return 'Превышена частота запросов.';
             if (kind === 'timeout') return 'Истекло время ожидания ответа.';
+            if (kind === 'invalid') return 'Получен ответ, но в нём нет ожидаемых данных фильма.';
             if (!status) return 'HTTP-ответ недоступен. Возможны CORS, DNS, TLS, сеть или блокировка. Точную причину этот тест не различает.';
             return 'Сервер вернул ошибку.';
         }
@@ -145,7 +146,7 @@
                 status = Number(status) || 0;
                 var lines = [
                     'Способ: ' + (useLampa ? 'Lampa.Reguest (5 с)' : 'XMLHttpRequest (15 с)'),
-                    'HTTP: ' + (status || 'нет доступного кода'),
+                    'HTTP: ' + (useLampa && status === 200 ? 'успешный ответ (точный код не передан)' : (status || 'нет доступного кода')),
                     'Время: ' + Math.max(0, Date.now() - started) + ' мс.',
                     explain(status, kind)
                 ];
