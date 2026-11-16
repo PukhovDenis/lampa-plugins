@@ -1,0 +1,247 @@
+/* Lampa Rating Tools v0.1.0 — independent companion for Rate.js.
+ * Tests run only on request. API key is read locally, sent only to the selected Kinopoisk API endpoint.
+ * Cache operations are limited to the two known KP/IMDb stores. No third-party code copied.
+ */
+(function ratingTools(window) {
+    'use strict';
+    var VERSION = '0.1.0';
+    var URL = 'https://kinopoiskapiunofficial.tech/api/v2.2/films/301';
+    var CACHE_KEYS = ['rating_cache_kp_rating', 'kp_rating'];
+    var ID = 'pukhov_rating_tools';
+    var busy = false, lastRefresh = 0, attempts = 0;
+    function boot() {
+        if (window.__pukhovRatingTools) return;
+        var L = window.Lampa;
+        if (!L || !window.appready || !L.SettingsApi || !L.Storage || !L.Modal || !window.$) {
+            if (++attempts < 120) window.setTimeout(boot, 500);
+            return;
+        }
+        var $ = window.$;
+        function key() {
+            return String(L.Storage.get('rating_kp_api_key', '') || L.Storage.get('source_api_key', '') || '').trim();
+        }
+        function isMap(value) {
+            return value !== null && typeof value === 'object' && !Array.isArray(value);
+        }
+        function valid(value) {
+            var n = Number(value);
+            return isFinite(n) && n > 0 && n <= 10;
+        }
+        function ratingRecord(value) {
+            return isMap(value) && (Object.prototype.hasOwnProperty.call(value, 'kp') || Object.prototype.hasOwnProperty.call(value, 'imdb'));
+        }
+        function emptyRecord(value) {
+            return ratingRecord(value) && !valid(value.kp) && !valid(value.imdb);
+        }
+        function maps() {
+            return CACHE_KEYS.map(function (name) {
+                var value = L.Storage.get(name, '');
+                return {name: name, value: isMap(value) ? value : null};
+            });
+        }
+        function close() { L.Modal.close(); }
+        function dialog(title, lines, confirmed) {
+            var wrap = $('<div></div>').css({lineHeight:'1.5', padding:'0.4em'});
+            lines.forEach(function (line) {
+                wrap.append($('<div></div>').css({marginBottom:'0.55em'}).text(line));
+            });
+            var buttons = confirmed ? [
+                {name:'Отмена', onSelect:close},
+                {name:'Подтвердить', onSelect:function () { close(); confirmed(); }}
+            ] : [{name:'Закрыть', onSelect:close}];
+            L.Modal.open({title:title,html:wrap,size:'medium',buttons:buttons,onBack:close});
+        }
+        function notify(message) {
+            if (L.Noty && typeof L.Noty.show === 'function') L.Noty.show(message);
+        }
+        function showStats() {
+            var lines = [];
+            maps().forEach(function (entry, index) {
+                var stats = {total:0,good:0,empty:0,other:0};
+                if (entry.value) Object.keys(entry.value).forEach(function (id) {
+                    var item = entry.value[id]; stats.total++;
+                    if (ratingRecord(item) && (valid(item.kp) || valid(item.imdb))) stats.good++;
+                    else if (emptyRecord(item)) stats.empty++;
+                    else stats.other++;
+                });
+                lines.push((index === 0 ? 'Кэш Rate.js' : 'Совместимый (старый) кэш') + ': ' +
+                    stats.total + ' записей; с оценками: ' + stats.good +
+                    '; пустых: ' + stats.empty + '; прочих: ' + stats.other);
+            });
+            lines.push('Записи в двух хранилищах могут дублироваться. Это не число уникальных фильмов.');
+            lines.push('API-ключ: ' + (key() ? 'задан' : 'не задан') +
+                '. Функция обновления Rate.js: ' + (typeof window.refreshAllRatings === 'function' ? 'найдена' : 'не найдена') + '.');
+            dialog('Статистика кэша', lines);
+        }
+        function purge(all) {
+            try {
+                var entries = maps(), removed = 0, visited = [], changed = [];
+                entries.forEach(function (entry) {
+                    if (!entry.value) return;
+                    if (visited.indexOf(entry.value) === -1) {
+                        visited.push(entry.value);
+                        var n = 0;
+                        Object.keys(entry.value).forEach(function (id) {
+                            if (all || emptyRecord(entry.value[id])) {
+                                delete entry.value[id];
+                                n++;
+                            }
+                        });
+                        removed += n;
+                        if (n) changed.push(entry.value);
+                    }
+                });
+                // Keep object identities so Rate.js can keep its live references.
+                // Only the two known rating stores are touched.
+                entries.forEach(function (entry) {
+                    if (entry.value && changed.indexOf(entry.value) !== -1)
+                        L.Storage.set(entry.name, entry.value, true);
+                });
+                dialog('Очистка кэша', [
+                    'Удалено записей: ' + removed + '.',
+                    'Остальные настройки, API-ключ, история просмотров и Keyboard Fix не затронуты.',
+                    'Полностью перезапустите Lampa перед проверкой: активные запросы Rate.js могут снова записать результаты.'
+                ]);
+            } catch (e) {
+                dialog('Ошибка очистки', ['Не удалось полностью обновить кэш. Проверьте статистику.']);
+            }
+        }
+        function askPurge(all) {
+            dialog(all ? 'Очистить кэш КиноПоиска и IMDb?' : 'Очистить пустые рейтинги?', [
+                all ? 'Будут удалены все записи из двух известных хранилищ оценок КиноПоиска и IMDb.' :
+                    'Будут удалены только записи, в которых нет ни одной положительной оценки КиноПоиска или IMDb. Успешные оценки сохранятся.',
+                'После очистки полностью перезапустите Lampa. Повторное получение оценок расходует лимит API.'
+            ], function () { purge(all); });
+        }
+        function explain(status, kind) {
+            if (status === 200) return 'Сервер ответил успешно.';
+            if (status === 401) return 'Ключ отклонён сервером.';
+            if (status === 402) return 'Лимит запросов исчерпан.';
+            if (status === 403) return 'Доступ запрещён сервером.';
+            if (status === 429) return 'Превышена частота запросов.';
+            if (kind === 'timeout') return 'Истекло время ожидания ответа.';
+            if (!status) return 'HTTP-ответ недоступен. Возможны CORS, DNS, TLS, сеть или блокировка. Точную причину этот тест не различает.';
+            return 'Сервер вернул ошибку.';
+        }
+        function testApi(useLampa) {
+            if (busy) { notify('Проверка уже выполняется'); return; }
+            var apiKey = key();
+            if (!apiKey) {
+                dialog('API-ключ не задан', ['Введите ключ в настройках Rate.js.']);
+                return;
+            }
+            if (useLampa && typeof L.Reguest !== 'function') {
+                dialog('Диагностика', ['Сетевой модуль Lampa.Reguest недоступен.']);
+                return;
+            }
+            busy = true;
+            var started = Date.now(), done = false, request, timer, xhr;
+            notify('Rating Tools: выполняется один запрос к API');
+            function finish(status, kind, body) {
+                if (done) return;
+                done = true; busy = false;
+                if (timer != null) window.clearTimeout(timer);
+                apiKey = '';
+                status = Number(status) || 0;
+                var lines = [
+                    'Способ: ' + (useLampa ? 'Lampa.Reguest (5 с)' : 'XMLHttpRequest (15 с)'),
+                    'HTTP: ' + (status || 'нет доступного кода'),
+                    'Время: ' + Math.max(0, Date.now() - started) + ' мс.',
+                    explain(status, kind)
+                ];
+                if (status === 200) {
+                    var kp = body && valid(body.ratingKinopoisk) ? Number(body.ratingKinopoisk).toFixed(1) : 'нет';
+                    var imdb = body && valid(body.ratingImdb) ? Number(body.ratingImdb).toFixed(1) : 'нет';
+                    lines.push('Тест: Матрица (ID 301). КиноПоиск: ' + kp + '; IMDb: ' + imdb + '.');
+                    if (!body || Number(body.kinopoiskId) !== 301) lines.push('Ответ не содержит ожидаемый ID фильма; проверьте иные сетевые модули.');
+                }
+                lines.push('Ключ не выводится. Тест не изменяет кэш рейтингов.');
+                // Avoid interrupting another dialog if the user has left settings.
+                var active = L.Controller && typeof L.Controller.enabled === 'function' && L.Controller.enabled();
+                if (active && active.name && active.name !== 'settings_component' && active.name !== 'settings') {
+                    lastResult = lines;
+                    notify('Rating Tools: тест завершён. Результат в разделе «Последний тест».');
+                } else {
+                    lastResult = lines;
+                    dialog('Результат проверки API', lines);
+                }
+            }
+            try {
+                if (useLampa) {
+                    request = new L.Reguest();
+                    timer = window.setTimeout(function () {
+                        finish(0, 'timeout');
+                        try { request.clear(); } catch (ignore) {}
+                    }, 8000);
+                    request.timeout(5000);
+                    request.silent(URL, function (data) {
+                        // The public Lampa callback provides parsed data, not the raw HTTP status.
+                        if (data && Number(data.kinopoiskId) === 301) finish(200, 'ok', data);
+                        else finish(0, 'invalid');
+                    }, function (err, exception) {
+                        var status = err && err.status;
+                        finish(status, typeof exception === 'string' && exception === 'timeout' ? 'timeout' : 'error');
+                    }, false, {headers:{'X-API-KEY':apiKey}});
+                } else {
+                    xhr = new window.XMLHttpRequest();
+                    xhr.open('GET', URL, true);
+                    xhr.timeout = 15000;
+                    xhr.setRequestHeader('X-API-KEY', apiKey);
+                    xhr.setRequestHeader('Accept', 'application/json');
+                    xhr.onload = function () {
+                        var data = null;
+                        if (xhr.status === 200) {
+                            try { data = JSON.parse(xhr.responseText); } catch (ignore) {}
+                        }
+                        finish(xhr.status, 'load', data);
+                    };
+                    xhr.onerror = function () { finish(0, 'error'); };
+                    xhr.ontimeout = function () { finish(0, 'timeout'); };
+                    xhr.onabort = function () { finish(0, 'error'); };
+                    xhr.send();
+                }
+            } catch (e) { finish(0, 'error'); }
+        }
+        var lastResult = null;
+        function refresh() {
+            if (typeof window.refreshAllRatings !== 'function') {
+                dialog('Обновление', ['Функция Rate.js не найдена. Проверьте, что Rate.js включён и приложение перезапущено.']);
+                return;
+            }
+            dialog('Обновить рейтинги?', [
+                'Будет вызвана штатная функция Rate.js для уже загруженных карточек.',
+                'Может использовать несколько запросов из дневного лимита. Кэш не очищается автоматически.'
+            ], function () {
+                var now = Date.now();
+                if (lastRefresh && now - lastRefresh < 15000) { notify('Повторное обновление доступно через 15 секунд'); return; }
+                lastRefresh = now;
+                try {
+                    var nodes = window.document.querySelectorAll('.card__vote-line[data-kp-requested]');
+                    for (var i = 0; i < nodes.length; i++) nodes[i].removeAttribute('data-kp-requested');
+                    window.refreshAllRatings();
+                    notify('Rating Tools: запрос обновления передан Rate.js');
+                } catch (e) { notify('Rating Tools: ошибка обновления'); }
+            });
+        }
+        function add(name, title, description, action) {
+            L.SettingsApi.addParam({
+                component:ID, param:{name:ID+'_'+name,type:'button'},
+                field:{name:title,description:description},onChange:action
+            });
+        }
+        // Real Lampa API access also identifies this as a Lampa extension.
+        window.Lampa.SettingsApi.addComponent({
+            component:ID,name:'Rating Tools',
+            icon:'<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18M7 16l4-5 4 3 5-7"/><circle cx="20" cy="7" r="1.5"/></svg>'
+        });
+        add('api','Проверить API-ключ','Один прямой запрос с приставки; ключ не выводится.',function(){testApi(false);});
+        add('network','Диагностика подключения Rate.js','Один запрос через Lampa.Reguest, как в Rate.js.',function(){testApi(true);});
+        add('last','Последний тест','Показать результат без нового запроса.',function(){dialog('Последний тест',lastResult || ['Тест ещё не выполнялся.']);});
+        add('stats','Статистика кэша','Сохранённые, пустые и прочие записи КиноПоиска/IMDb.',showStats);
+        add('empty','Очистить пустые рейтинги','Сохранить записи с успешно полученными оценками.',function(){askPurge(false);});
+        add('clear','Очистить кэш рейтингов','Только известные хранилища КиноПоиска/IMDb.',function(){askPurge(true);});
+        add('refresh','Обновить рейтинги','Вызвать штатную функцию Rate.js.',refresh);
+        window.__pukhovRatingTools = VERSION;
+    }
+    boot();
+})(window);
